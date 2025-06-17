@@ -4,6 +4,13 @@ from web3 import Web3
 import pyperclip
 import os
 import json
+import base64
+from getpass import getpass
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.backends import default_backend
 
 # === Configuration réseau Binance Smart Chain (peut être ignorée en mode hors ligne) ===
 bsc_rpc = "https://bsc-dataseed1.ninicoin.io/"
@@ -58,7 +65,39 @@ def update_next_once(address):
     print_qr("https://pointages-mobiles.eu/get_nonce.php?address=" + address)
     update_stored_nonce(address,int(input("Input new nonce please : ")))
 
+def derive_key(password: str, salt: bytes, iterations: int = 100_000) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=iterations,
+        backend=default_backend()
+    )
+    return kdf.derive(password.encode())
+
+def encrypt(message: str, password: str) -> str:
+    salt = os.urandom(16)
+    key = derive_key(password, salt)
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, message.encode(), None)
+    return base64.b64encode(salt + nonce + ciphertext).decode()
+
+def decrypt(encrypted_data: str, password: str) -> str:
+    try:
+        data = base64.b64decode(encrypted_data)
+        salt, nonce, ciphertext = data[:16], data[16:28], data[28:]
+        key = derive_key(password, salt)
+        aesgcm = AESGCM(key)
+        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+        return plaintext.decode()
+    except InvalidTag:
+        return None  # Mot de passe incorrect ou données corrompues
+
+
 # === Fonctions de base ===
+
+
 def load_keys():
     Account.enable_unaudited_hdwallet_features()
     keys = []
@@ -82,7 +121,7 @@ def print_qr(data):
     qr = qrcode.QRCode()
     qr.add_data(data)
     qr.make()
-    qr.print_ascii()
+    qr.print_tty()
 
 def show_address_qr(address):
     print(f"\nQR Code de l'adresse: {address}")
@@ -181,9 +220,62 @@ def wallet_actions(index, private_keys):
 
 # === Lancement ===
 if __name__ == "__main__":
-    mnemo = input("Phrase mnémonique : ").strip()
-    d2 = input("Chemin de dérivation (ex: 44 60 0 0) : ").strip()
-    nb = int(input("Nombre de comptes à générer : "))
+    print(r"""  ______    ______   __        _______   __       __   ______   __        __        ________  ________ 
+ /      \  /      \ /  |      /       \ /  |  _  /  | /      \ /  |      /  |      /        |/        |
+/$$$$$$  |/$$$$$$  |$$ |      $$$$$$$  |$$ | / \ $$ |/$$$$$$  |$$ |      $$ |      $$$$$$$$/ $$$$$$$$/ 
+$$ |  $$/ $$ |  $$ |$$ |      $$ |  $$ |$$ |/$  \$$ |$$ |__$$ |$$ |      $$ |      $$ |__       $$ |   
+$$ |      $$ |  $$ |$$ |      $$ |  $$ |$$ /$$$  $$ |$$    $$ |$$ |      $$ |      $$    |      $$ |   
+$$ |   __ $$ |  $$ |$$ |      $$ |  $$ |$$ $$/$$ $$ |$$$$$$$$ |$$ |      $$ |      $$$$$/       $$ |   
+$$ \__/  |$$ \__$$ |$$ |_____ $$ |__$$ |$$$$/  $$$$ |$$ |  $$ |$$ |_____ $$ |_____ $$ |_____    $$ |   
+$$    $$/ $$    $$/ $$       |$$    $$/ $$$/    $$$ |$$ |  $$ |$$       |$$       |$$       |   $$ |   
+ $$$$$$/   $$$$$$/  $$$$$$$$/ $$$$$$$/  $$/      $$/ $$/   $$/ $$$$$$$$/ $$$$$$$$/ $$$$$$$$/    $$/    
+                                                                                                      """)
+    print("- Login to an existing account -> Choose 1")
+    print("- Add an account -> Choose 2")
+    inputX = input("Please input a number btw 1 -> 2 : ")
+
+    if inputX == "2":
+        mnemo = input("Mnemonic phrase : ").strip()
+        d2 = input("Data 2 : ").strip()
+        nb = int(input("Number of accounts : "))
+        password = getpass("Choose a password : ")
+        reenterpass = getpass("Please reenter your password : ")
+        if password != reenterpass:
+            print("Passwords do not match. Please retry")
+            exit()
+        data_to_store = json.dumps({"mnemo": mnemo, "d2": d2, "nb": nb})
+        encrypted = encrypt(data_to_store, password)
+        with open("vault.dat", "w") as f:
+            f.write(encrypted)
+        print("Data saved. Connecting..")
+
+    elif inputX == "1":
+        if not os.path.exists("vault.dat"):
+            print("No accounts found, please create a new one. Thank you !")
+            exit()
+
+        for _ in range(3):
+            password = getpass("Enter your password please : ")
+            with open("vault.dat", "r") as f:
+                encrypted = f.read()
+
+            decrypted = decrypt(encrypted, password)
+            if decrypted:
+                data = json.loads(decrypted)
+                mnemo = data["mnemo"]
+                d2 = data["d2"]
+                nb = data["nb"]
+                print("Correct. Connecting ...")
+                break
+            else:
+                print("incorrect pass")
+        else:
+            print("Closing after too much try")
+            exit()
+
+    else:
+        print("Invalid Choice")
+        exit()
 
     private_keys = load_keys()
     show_wallets(private_keys)
